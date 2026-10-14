@@ -11,3 +11,11 @@ __pycache__/
 
 # Environment variables and secrets
 .env
+
+# Cython build artifacts
+build/
+*.c
+*.pyd
+*.obj
+*.lib
+*.exp
