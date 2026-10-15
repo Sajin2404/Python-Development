@@ -21,31 +21,47 @@ cdef struct PriceLevel:
     int tail
 
 
+cdef struct Trade:
+    int64_t buy_order_id
+    int64_t sell_order_id
+    int64_t price
+    int64_t quantity
+
+    
 cdef class OrderBook:
     cdef Order* orders
     cdef PriceLevel* bids
     cdef PriceLevel* asks
+    cdef Trade* trade_buffer
     cdef int order_capacity
     cdef int bid_count
     cdef int ask_count
     cdef int next_order_slot
-    cdef object trades
+    cdef int trade_count
 
     def __cinit__(self, int capacity=1000000):
         if capacity <= 0:
             raise ValueError("capacity must be positive")
 
+        
         self.order_capacity = capacity
         self.bid_count = 0
         self.ask_count = 0
         self.next_order_slot = 0
-        self.trades = []
+        self.trade_count = 0
+        self.trade_buffer = NULL
 
         self.orders = <Order*>malloc(capacity * sizeof(Order))
         self.bids = <PriceLevel*>malloc(capacity * sizeof(PriceLevel))
         self.asks = <PriceLevel*>malloc(capacity * sizeof(PriceLevel))
+        self.trade_buffer = <Trade*>malloc(capacity * sizeof(Trade))
 
-        if self.orders == NULL or self.bids == NULL or self.asks == NULL:
+        if (
+             self.orders == NULL
+             or self.bids == NULL
+             or self.asks == NULL
+             or self.trade_buffer == NULL
+           ):
             if self.orders != NULL:
                 free(self.orders)
                 self.orders = NULL
@@ -54,8 +70,11 @@ cdef class OrderBook:
                 self.bids = NULL
             if self.asks != NULL:
                 free(self.asks)
-                self.asks = NULL
-            raise MemoryError("Could not allocate order book")
+                self.asks = NULL    
+            if self.trade_buffer != NULL:
+                free(self.trade_buffer)
+                self.trade_buffer = NULL
+            raise MemoryError("Could not allocate order book")    
 
     def __dealloc__(self):
         if self.orders != NULL:
@@ -64,6 +83,8 @@ cdef class OrderBook:
             free(self.bids)
         if self.asks != NULL:
             free(self.asks)
+        if self.trade_buffer != NULL:
+            free(self.trade_buffer)
 
     cdef int _find_level(self, PriceLevel* levels, int count,
                          int64_t price, bint descending) noexcept:
@@ -163,12 +184,14 @@ cdef class OrderBook:
                 if self.orders[resting_slot].remaining < fill:
                     fill = self.orders[resting_slot].remaining
 
-                self.trades.append({
-                    "buy_order_id": oid,
-                    "sell_order_id": self.orders[resting_slot].order_id,
-                    "price": self.asks[level].price,
-                    "quantity": fill,
-                })
+                if self.trade_count >= self.order_capacity:
+                    raise MemoryError("Trade buffer capacity reached")
+
+                self.trade_buffer[self.trade_count].buy_order_id = oid
+                self.trade_buffer[self.trade_count].sell_order_id = self.orders[resting_slot].order_id
+                self.trade_buffer[self.trade_count].price = self.asks[level].price
+                self.trade_buffer[self.trade_count].quantity = fill
+                self.trade_count += 1
 
                 remaining -= fill
                 self.orders[resting_slot].remaining -= fill
@@ -196,12 +219,14 @@ cdef class OrderBook:
                 if self.orders[resting_slot].remaining < fill:
                     fill = self.orders[resting_slot].remaining
 
-                self.trades.append({
-                    "buy_order_id": self.orders[resting_slot].order_id,
-                    "sell_order_id": oid,
-                    "price": self.bids[level].price,
-                    "quantity": fill,
-                })
+                if self.trade_count >= self.order_capacity:
+                    raise MemoryError("Trade buffer capacity reached")
+
+                self.trade_buffer[self.trade_count].buy_order_id = self.orders[resting_slot].order_id
+                self.trade_buffer[self.trade_count].sell_order_id = oid
+                self.trade_buffer[self.trade_count].price = self.bids[level].price
+                self.trade_buffer[self.trade_count].quantity = fill
+                self.trade_count += 1
 
                 remaining -= fill
                 self.orders[resting_slot].remaining -= fill
@@ -232,4 +257,15 @@ cdef class OrderBook:
         return self.asks[0].price
 
     def get_trades(self):
-        return list(self.trades)
+        cdef int i
+        cdef list trades = []
+
+        for i in range(self.trade_count):
+            trades.append({
+                "buy_order_id": self.trade_buffer[i].buy_order_id,
+                "sell_order_id": self.trade_buffer[i].sell_order_id,
+                "price": self.trade_buffer[i].price,
+                "quantity": self.trade_buffer[i].quantity,
+            })
+
+        return trades
