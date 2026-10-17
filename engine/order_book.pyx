@@ -27,7 +27,7 @@ cdef struct Trade:
     int64_t price
     int64_t quantity
 
-    
+
 cdef class OrderBook:
     cdef Order* orders
     cdef PriceLevel* bids
@@ -87,7 +87,7 @@ cdef class OrderBook:
             free(self.trade_buffer)
 
     cdef int _find_level(self, PriceLevel* levels, int count,
-                         int64_t price, bint descending) noexcept:
+                         int64_t price, bint descending) noexcept nogil:
         cdef int i
         for i in range(count):
             if levels[i].price == price:
@@ -123,7 +123,7 @@ cdef class OrderBook:
         return pos
 
     cdef void _remove_level(self, PriceLevel* levels, int* count,
-                            int pos) noexcept:
+                            int pos) noexcept nogil:
         cdef int i
         for i in range(pos, count[0] - 1):
             levels[i] = levels[i + 1]
