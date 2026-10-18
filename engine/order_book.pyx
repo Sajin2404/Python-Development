@@ -28,6 +28,68 @@ cdef struct Trade:
     int64_t quantity
 
 
+cdef int64_t _match_orders_nogil(
+    Order* orders,
+    PriceLevel* levels,
+    int* level_count,
+    Trade* trade_buffer,
+    int trade_capacity,
+    int* trade_count,
+    int side,
+    int64_t incoming_order_id,
+    int64_t incoming_price,
+    int64_t incoming_quantity
+) noexcept nogil:
+    cdef int64_t remaining = incoming_quantity
+    cdef int64_t fill
+    cdef int resting_slot
+    cdef int i
+
+    while remaining > 0 and level_count[0] > 0:
+        if side == 1 and levels[0].price > incoming_price:
+            break
+        if side == 2 and levels[0].price < incoming_price:
+            break
+
+        resting_slot = levels[0].head
+        if resting_slot < 0:
+            break
+
+        fill = remaining
+        if orders[resting_slot].remaining < fill:
+            fill = orders[resting_slot].remaining
+
+        if fill <= 0 or trade_count[0] >= trade_capacity:
+            return -1
+
+        if side == 1:
+            trade_buffer[trade_count[0]].buy_order_id = incoming_order_id
+            trade_buffer[trade_count[0]].sell_order_id = orders[resting_slot].order_id
+        else:
+            trade_buffer[trade_count[0]].buy_order_id = orders[resting_slot].order_id
+            trade_buffer[trade_count[0]].sell_order_id = incoming_order_id
+
+        trade_buffer[trade_count[0]].price = levels[0].price
+        trade_buffer[trade_count[0]].quantity = fill
+        trade_count[0] += 1
+
+        remaining -= fill
+        orders[resting_slot].remaining -= fill
+
+        if orders[resting_slot].remaining == 0:
+            levels[0].head = orders[resting_slot].next
+
+            if levels[0].head == -1:
+                levels[0].tail = -1
+
+                for i in range(level_count[0] - 1):
+                    levels[i] = levels[i + 1]
+
+                level_count[0] -= 1
+
+    return remaining
+
+
 cdef class OrderBook:
     cdef Order* orders
     cdef PriceLevel* bids
@@ -156,6 +218,7 @@ cdef class OrderBook:
             self.orders[levels[level].tail].next = slot
             levels[level].tail = slot
 
+   
     def add_order(self, order_id, side, price, quantity):
         cdef int64_t oid = order_id
         cdef int64_t p = price
@@ -163,84 +226,96 @@ cdef class OrderBook:
         cdef int s = side
         cdef int slot
         cdef int level
-        cdef int resting_slot
-        cdef int64_t fill
-        cdef int64_t remaining = q
+        cdef int scan_level
+        cdef int scan_slot
+        cdef int needed_trades = 0
+        cdef int64_t remaining
+        cdef int64_t scan_remaining
+        cdef int64_t resting_quantity
+        cdef PriceLevel* opposing_levels
+        cdef int* opposing_count
 
         if s not in (1, 2):
             raise ValueError("side must be 1 (BUY) or 2 (SELL)")
         if oid < 0 or p <= 0 or q <= 0:
-            raise ValueError("order_id must be non-negative; price and quantity must be positive")
-
-        slot = self._allocate_order(oid, s, p, q)
+            raise ValueError(
+                "order_id must be non-negative; price and quantity must be positive"
+            )
 
         if s == 1:
-            while remaining > 0 and self.ask_count > 0:
-                if self.asks[0].price > p:
-                    break
-                level = 0
-                resting_slot = self.asks[level].head
-                fill = remaining
-                if self.orders[resting_slot].remaining < fill:
-                    fill = self.orders[resting_slot].remaining
+            opposing_levels = self.asks
+            opposing_count = &self.ask_count
+        else:
+            opposing_levels = self.bids
+            opposing_count = &self.bid_count
 
-                if self.trade_count >= self.order_capacity:
-                    raise MemoryError("Trade buffer capacity reached")
+        # Preflight the number of trades before mutating the book.
+        scan_remaining = q
+        for scan_level in range(opposing_count[0]):
+            if scan_remaining <= 0:
+                break
 
-                self.trade_buffer[self.trade_count].buy_order_id = oid
-                self.trade_buffer[self.trade_count].sell_order_id = self.orders[resting_slot].order_id
-                self.trade_buffer[self.trade_count].price = self.asks[level].price
-                self.trade_buffer[self.trade_count].quantity = fill
-                self.trade_count += 1
+            if s == 1 and opposing_levels[scan_level].price > p:
+                break
+            if s == 2 and opposing_levels[scan_level].price < p:
+                break
 
-                remaining -= fill
-                self.orders[resting_slot].remaining -= fill
+            scan_slot = opposing_levels[scan_level].head
+            while scan_slot != -1 and scan_remaining > 0:
+                resting_quantity = self.orders[scan_slot].remaining
 
-                if self.orders[resting_slot].remaining == 0:
-                    self.asks[level].head = self.orders[resting_slot].next
-                    if self.asks[level].head == -1:
-                        self.asks[level].tail = -1
-                        self._remove_level(self.asks, &self.ask_count, level)
+                if resting_quantity > 0:
+                    needed_trades += 1
+                    if scan_remaining <= resting_quantity:
+                        scan_remaining = 0
+                    else:
+                        scan_remaining -= resting_quantity
 
-            if remaining > 0:
-                level = self._find_level(self.bids, self.bid_count, p, True)
+                scan_slot = self.orders[scan_slot].next
+
+        if self.trade_count + needed_trades > self.order_capacity:
+            raise MemoryError("Trade buffer capacity reached")
+
+        # Allocate before matching so capacity errors cannot occur afterward.
+        slot = self._allocate_order(oid, s, p, q)
+
+        with nogil:
+            remaining = _match_orders_nogil(
+                self.orders,
+                opposing_levels,
+                opposing_count,
+                self.trade_buffer,
+                self.order_capacity,
+                &self.trade_count,
+                s,
+                oid,
+                p,
+                q
+            )
+
+        if remaining < 0:
+            raise RuntimeError("Native matching failed")
+
+        # Rest any unfilled quantity at the incoming order's price.
+        if remaining > 0:
+            if s == 1:
+                level = self._find_level(
+                    self.bids, self.bid_count, p, True
+                )
                 if level == -1:
-                    level = self._insert_level(self.bids, &self.bid_count, p, True)
+                    level = self._insert_level(
+                        self.bids, &self.bid_count, p, True
+                    )
                 self.orders[slot].remaining = remaining
                 self._append_order(self.bids, level, slot)
-
-        else:
-            while remaining > 0 and self.bid_count > 0:
-                if self.bids[0].price < p:
-                    break
-                level = 0
-                resting_slot = self.bids[level].head
-                fill = remaining
-                if self.orders[resting_slot].remaining < fill:
-                    fill = self.orders[resting_slot].remaining
-
-                if self.trade_count >= self.order_capacity:
-                    raise MemoryError("Trade buffer capacity reached")
-
-                self.trade_buffer[self.trade_count].buy_order_id = self.orders[resting_slot].order_id
-                self.trade_buffer[self.trade_count].sell_order_id = oid
-                self.trade_buffer[self.trade_count].price = self.bids[level].price
-                self.trade_buffer[self.trade_count].quantity = fill
-                self.trade_count += 1
-
-                remaining -= fill
-                self.orders[resting_slot].remaining -= fill
-
-                if self.orders[resting_slot].remaining == 0:
-                    self.bids[level].head = self.orders[resting_slot].next
-                    if self.bids[level].head == -1:
-                        self.bids[level].tail = -1
-                        self._remove_level(self.bids, &self.bid_count, level)
-
-            if remaining > 0:
-                level = self._find_level(self.asks, self.ask_count, p, False)
+            else:
+                level = self._find_level(
+                    self.asks, self.ask_count, p, False
+                )
                 if level == -1:
-                    level = self._insert_level(self.asks, &self.ask_count, p, False)
+                    level = self._insert_level(
+                        self.asks, &self.ask_count, p, False
+                    )
                 self.orders[slot].remaining = remaining
                 self._append_order(self.asks, level, slot)
 
