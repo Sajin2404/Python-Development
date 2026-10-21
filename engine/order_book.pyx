@@ -330,6 +330,50 @@ cdef class OrderBook:
         if self.ask_count == 0:
             return None
         return self.asks[0].price
+         
+    def get_market_depth(self, levels=5):
+        """Return the top price levels and their aggregate remaining quantities."""
+        cdef int i
+        cdef int slot
+        cdef int limit
+        cdef long long total_quantity
+        cdef list bid_depth = []
+        cdef list ask_depth = []
+
+        if levels < 1:
+            raise ValueError("levels must be at least 1")
+
+        # Aggregate BUY quantities by price level.
+        limit = min(levels, self.bid_count)
+        for i in range(limit):
+            total_quantity = 0
+            slot = self.bids[i].head
+
+            while slot != -1:
+                total_quantity += self.orders[slot].remaining
+                slot = self.orders[slot].next
+
+            bid_depth.append({
+                "price": self.bids[i].price,
+                "quantity": total_quantity,
+            })
+
+        # Aggregate SELL quantities by price level.
+        limit = min(levels, self.ask_count)
+        for i in range(limit):
+            total_quantity = 0
+            slot = self.asks[i].head
+
+            while slot != -1:
+                total_quantity += self.orders[slot].remaining
+                slot = self.orders[slot].next
+
+            ask_depth.append({
+                "price": self.asks[i].price,
+                "quantity": total_quantity,
+            })
+
+        return {"bids": bid_depth, "asks": ask_depth}
 
     def get_trades(self):
         cdef int i

@@ -3,18 +3,17 @@ import argparse
 import asyncio
 import random
 import time
-
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ipc.ring_buffer import RingBuffer
+from engine.order_book import OrderBook
 
 
 async def generate_orders(buffer, total_orders=1000, batch_size=100):
-    """Generate mock market orders asynchronously."""
-
+    """Generate mock orders and publish them to the ring buffer."""
     submitted = 0
     start_time = time.perf_counter()
 
@@ -23,11 +22,11 @@ async def generate_orders(buffer, total_orders=1000, batch_size=100):
 
         for _ in range(current_batch):
             order_id = submitted + 1
-            side = random.choice((1, 2))  # 1 = BUY, 2 = SELL
-            price = random.randint(10000, 11000)  # Price in paise
+            side = random.choice((1, 2))
+            price = random.randint(10000, 11000)
             quantity = random.randint(1, 100)
 
-            # Retry when the buffer is full.
+            # Wait until there is space in the buffer.
             while not buffer.write_order(
                 order_id, side, price, quantity
             ):
@@ -35,67 +34,76 @@ async def generate_orders(buffer, total_orders=1000, batch_size=100):
 
             submitted += 1
 
-        # Yield control so other asynchronous tasks can run.
         await asyncio.sleep(0)
 
     elapsed = time.perf_counter() - start_time
     rate = submitted / elapsed if elapsed > 0 else 0
 
     print(f"Orders generated: {submitted}")
-    print(f"Elapsed time: {elapsed:.6f} seconds")
+    print(f"Generation time: {elapsed:.6f} seconds")
     print(f"Generation rate: {rate:,.0f} orders/second")
 
 
-async def consume_orders(buffer):
-    """Consume orders while the producer is running."""
-
+async def consume_orders(buffer, book):
+    """Read orders from the ring buffer and process them in Cython."""
     consumed = 0
 
     while True:
         order = buffer.read_order()
 
         if order is not None:
+            order_id, side, price, quantity = order
+            book.add_order(order_id, side, price, quantity)
             consumed += 1
         else:
+            if getattr(buffer, "producer_finished", False):
+                break
             await asyncio.sleep(0)
-
-        # The producer sets this attribute when finished.
-        if getattr(buffer, "producer_finished", False) and order is None:
-            break
 
     return consumed
 
 
-
 async def run_simulation(total_orders, capacity):
     with RingBuffer(capacity=capacity) as buffer:
+        book = OrderBook(capacity=max(total_orders, 1))
         buffer.producer_finished = False
 
-        consumer_task = asyncio.create_task(consume_orders(buffer))
+        consumer_task = asyncio.create_task(
+            consume_orders(buffer, book)
+        )
 
-        # Start timing the complete producer-consumer run
         start_time = time.perf_counter()
 
-        await generate_orders(buffer, total_orders=total_orders)
+        await generate_orders(
+            buffer,
+            total_orders=total_orders,
+        )
         buffer.producer_finished = True
 
         consumed = await consumer_task
 
-        # Stop timing after all orders have been consumed
         elapsed = time.perf_counter() - start_time
         throughput = consumed / elapsed if elapsed > 0 else 0
+        trades = book.get_trades()
+        depth = book.get_market_depth(5)
 
-        print(f"Orders consumed: {consumed}")
+        print(f"\nOrders processed by engine: {consumed}")
+        print(f"Executed trades: {len(trades)}")
         print(f"End-to-end elapsed time: {elapsed:.6f} seconds")
         print(f"End-to-end throughput: {throughput:,.0f} orders/second")
+        print("Final market depth:", depth)
         print(
             "Simulation result:",
             "PASS" if consumed == total_orders else "FAIL",
         )
 
+        if consumed != total_orders:
+            raise RuntimeError("Not all generated orders were processed")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="ChronosMatch asynchronous market simulator"
+        description="ChronosMatch ring-buffer-to-Cython simulator"
     )
     parser.add_argument("--orders", type=int, default=1000)
     parser.add_argument("--capacity", type=int, default=1024)

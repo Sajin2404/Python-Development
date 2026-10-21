@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from engine.order_book import OrderBook
-
+from ipc.ring_buffer import RingBuffer
 
 st.set_page_config(
     page_title="ChronosMatch | Trading Engine",
@@ -112,7 +112,16 @@ with st.sidebar:
         value=100,
         step=50,
     )
-    st.info("Orders are simulated locally. No live exchange feed is connected.")
+    dashboard_mode = st.radio(
+     "Dashboard Mode",
+     ["Direct Engine", "Ring Buffer Pipeline"],
+     index=0,
+     help="Choose whether orders go directly to Cython or through the memory-mapped ring buffer first.",
+)
+
+st.info(
+    "Orders are simulated locally. No live exchange feed is connected."
+)
 
 # Keep the order book and measurements between Streamlit reruns.
 if "book" not in st.session_state:
@@ -146,36 +155,73 @@ if "last_throughput_count" not in st.session_state:
     
 batch_size = 10
 
-for _ in range(batch_size):
-    st.session_state.order_id += 1
+# Create a ring buffer for this dashboard refresh when pipeline mode is selected
+pipeline_buffer = (
+    RingBuffer(capacity=128)
+    if dashboard_mode == "Ring Buffer Pipeline"
+    else None
+)
 
-    side = random.choice((1, 2))  # 1 = BUY, 2 = SELL
-    price = random.randint(9900, 10100)
-    quantity = random.randint(1, 10)
+try:
+    for _ in range(batch_size):
+        st.session_state.order_id += 1
 
-    start = time.perf_counter_ns()
+        side = random.choice((1, 2))  # 1 = BUY, 2 = SELL
+        price = random.randint(9900, 10100)
+        quantity = random.randint(1, 10)
 
-    try:
-        book.add_order(
-            st.session_state.order_id,
-            side,
-            price,
-            quantity,
-        )
-        latency_us = (time.perf_counter_ns() - start) / 1000
+        start = time.perf_counter_ns()
 
-        st.session_state.latencies.append(latency_us)
-        st.session_state.latency_history.append(
-            {
-                "Order": st.session_state.successful_orders + 1,
-                "Latency (µs)": latency_us,
-            }
-        )
-        st.session_state.successful_orders += 1
+        try:
+            if pipeline_buffer is not None:
+                # Write the order to the ring buffer
+                written = pipeline_buffer.write_order(
+                    st.session_state.order_id,
+                    side,
+                    price,
+                    quantity,
+                )
 
-    except Exception as exc:
-        st.error(f"Matching engine error: {exc}")
-        break
+                if not written:
+                    raise RuntimeError("Ring buffer is full")
+
+                # Read the order and pass it to the Cython engine
+                order = pipeline_buffer.read_order()
+
+                if order is None:
+                    raise RuntimeError("Ring buffer returned no order")
+
+                book.add_order(*order)
+
+            else:
+                # Direct Engine mode
+                book.add_order(
+                    st.session_state.order_id,
+                    side,
+                    price,
+                    quantity,
+                )
+
+            latency_us = (
+                time.perf_counter_ns() - start
+            ) / 1000
+
+            st.session_state.latencies.append(latency_us)
+            st.session_state.latency_history.append(
+                {
+                    "Order": st.session_state.successful_orders + 1,
+                    "Latency (µs)": latency_us,
+                }
+            )
+            st.session_state.successful_orders += 1
+
+        except Exception as exc:
+            st.error(f"Matching engine error: {exc}")
+            break
+
+finally:
+    if pipeline_buffer is not None:
+        pipeline_buffer.close()
 
 trades = book.get_trades()
 st.session_state.trade_count = len(trades)
@@ -300,6 +346,55 @@ st.caption(
     f"Successfully processed orders: "
     f"{st.session_state.successful_orders:,}"
 )
+
+
+
+# --- MARKET DEPTH ---
+st.markdown("---")
+st.subheader("📊 Market Depth")
+
+depth = book.get_market_depth(5)
+
+bid_depth_df = pd.DataFrame(depth["bids"])
+ask_depth_df = pd.DataFrame(depth["asks"])
+
+# Format bid prices
+if not bid_depth_df.empty:
+    bid_depth_df["Price"] = bid_depth_df["price"] / 100
+    bid_depth_df = bid_depth_df[["Price", "quantity"]].rename(
+        columns={"quantity": "Quantity"}
+    )
+
+# Format ask prices
+if not ask_depth_df.empty:
+    ask_depth_df["Price"] = ask_depth_df["price"] / 100
+    ask_depth_df = ask_depth_df[["Price", "quantity"]].rename(
+        columns={"quantity": "Quantity"}
+    )
+
+bid_col, ask_col = st.columns(2)
+
+with bid_col:
+    st.markdown("#### 🟢 BID DEPTH")
+    if not bid_depth_df.empty:
+        st.dataframe(
+            bid_depth_df,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No resting buy orders.")
+
+with ask_col:
+    st.markdown("#### 🔴 ASK DEPTH")
+    if not ask_depth_df.empty:
+        st.dataframe(
+            ask_depth_df,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No resting sell orders.")
 
 
 # Latency monitoring chart
