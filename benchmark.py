@@ -19,11 +19,11 @@ def percentile(values, percent):
 
     ordered = sorted(values)
     rank = max(1, (percent * len(ordered) + 99) // 100)
-    return ordered[rank - 1]
+    return ordered[min(rank - 1, len(ordered) - 1)]
 
 
 def generate_orders(count, seed):
-    """Generate a repeatable set of orders."""
+    """Generate repeatable orders outside the timed section."""
     rng = random.Random(seed)
     return [
         (
@@ -37,7 +37,7 @@ def generate_orders(count, seed):
 
 
 def run_once(mode, orders):
-    """Run one measured trial and return its metrics."""
+    """Run one trial and return timing and market metrics."""
     book = OrderBook(capacity=len(orders) + 10)
     buffer = (
         RingBuffer(capacity=len(orders) + 10)
@@ -47,6 +47,7 @@ def run_once(mode, orders):
     latencies_us = []
 
     try:
+        # Total elapsed time includes the complete order-processing loop.
         total_start = time.perf_counter()
 
         for order_id, side, price, quantity in orders:
@@ -123,14 +124,12 @@ def main():
     print("Warming up both modes...")
 
     warm_up()
-
     results = []
 
     for run_number in range(1, args.runs + 1):
-        # Same generated orders for both modes within each trial.
         orders = generate_orders(args.orders, seed=1000 + run_number)
 
-        # Alternate order to reduce systematic ordering bias.
+        # Alternate mode order to reduce systematic ordering bias.
         modes = (
             ("direct", "pipeline")
             if run_number % 2 == 1
@@ -145,9 +144,9 @@ def main():
             print(
                 f"Run {run_number}/{args.runs} | {mode:8} | "
                 f"{result['throughput_ops']:,.0f} orders/s | "
-                f"avg {result['average_latency_us']:.3f} µs | "
-                f"P95 {result['p95_latency_us']:.3f} µs | "
-                f"P99 {result['p99_latency_us']:.3f} µs"
+                f"avg {result['average_latency_us']:.3f} us | "
+                f"P95 {result['p95_latency_us']:.3f} us | "
+                f"P99 {result['p99_latency_us']:.3f} us"
             )
 
     columns = [
@@ -181,17 +180,17 @@ def main():
         print(f"\nMode: {mode}")
         for key, label in (
             ("throughput_ops", "Throughput (orders/s)"),
-            ("average_latency_us", "Average latency (µs)"),
-            ("median_latency_us", "Median latency (µs)"),
-            ("p95_latency_us", "P95 latency (µs)"),
-            ("p99_latency_us", "P99 latency (µs)"),
+            ("average_latency_us", "Average latency (us)"),
+            ("median_latency_us", "Median latency (us)"),
+            ("p95_latency_us", "P95 latency (us)"),
+            ("p99_latency_us", "P99 latency (us)"),
         ):
             values = [result[key] for result in mode_results]
             print(f"{label}: {statistics.median(values):,.3f}")
 
-               # Compare each trial's market results against the other mode.
+        # Compare each trial against the other mode using the same orders.
         paired_results = {
-            (result["run"]): (
+            result["run"]: (
                 result["best_bid"],
                 result["best_ask"],
                 result["trades"],
