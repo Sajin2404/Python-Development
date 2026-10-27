@@ -454,7 +454,314 @@ st.caption(
     "Performance values measure the local add_order() call only. "
     "They are not end-to-end exchange latency measurements."
 )
+# ============================================================
+# BENCHMARK ANALYTICS
+# ============================================================
 
-# Automatically refresh the dashboard.
+st.divider()
+st.markdown("## BENCHMARK ANALYTICS")
+st.caption(
+    "Controlled Benchmark V2 results from repeated 100,000-order trials. "
+    "These measurements are separate from the live dashboard simulation."
+)
+
+from pathlib import Path
+
+benchmark_files = {
+    "Repeat 1": Path("benchmark_v2_repeat1.csv"),
+    "Repeat 2": Path("benchmark_v2_repeat2.csv"),
+}
+
+benchmark_frames = []
+
+for session_name, file_path in benchmark_files.items():
+    if file_path.exists():
+        try:
+            frame = pd.read_csv(file_path)
+
+            required_columns = {
+                "mode",
+                "orders",
+                "throughput_ops",
+                "sampled_median_latency_us",
+                "sampled_p95_latency_us",
+                "sampled_p99_latency_us",
+                "avg_write_us",
+                "avg_read_us",
+                "avg_engine_us",
+                "trades",
+                "run",
+            }
+
+            missing_columns = required_columns - set(frame.columns)
+
+            if missing_columns:
+                st.warning(
+                    f"{file_path.name} is missing columns: "
+                    f"{', '.join(sorted(missing_columns))}"
+                )
+            else:
+                frame["Session"] = session_name
+                benchmark_frames.append(frame)
+
+        except Exception as exc:
+            st.warning(f"Could not read {file_path.name}: {exc}")
+    else:
+        st.warning(f"Benchmark file not found: {file_path}")
+
+if benchmark_frames:
+    benchmark_df = pd.concat(
+        benchmark_frames,
+        ignore_index=True,
+    )
+
+    # Normalize mode labels for consistent charts.
+    benchmark_df["mode"] = (
+        benchmark_df["mode"].astype(str).str.lower().str.strip()
+    )
+
+    mode_names = {
+        "direct": "Direct Engine",
+        "pipeline": "Ring Buffer Pipeline",
+    }
+
+    benchmark_df["Mode"] = benchmark_df["mode"].map(mode_names)
+    benchmark_df = benchmark_df.dropna(subset=["Mode"])
+
+    if not benchmark_df.empty:
+        # ----------------------------------------------------
+        # OVERALL BENCHMARK SUMMARY
+        # ----------------------------------------------------
+
+        summary = (
+            benchmark_df.groupby("Mode")
+            .agg(
+                Trials=("throughput_ops", "count"),
+                Orders=("orders", "median"),
+                Throughput=("throughput_ops", "median"),
+                Median_Latency=("sampled_median_latency_us", "median"),
+                P95_Latency=("sampled_p95_latency_us", "median"),
+                P99_Latency=("sampled_p99_latency_us", "median"),
+                Engine_Time=("avg_engine_us", "median"),
+                Write_Time=("avg_write_us", "median"),
+                Read_Time=("avg_read_us", "median"),
+            )
+        )
+
+        direct_row = summary.loc["Direct Engine"] if (
+            "Direct Engine" in summary.index
+        ) else None
+
+        pipeline_row = summary.loc["Ring Buffer Pipeline"] if (
+            "Ring Buffer Pipeline" in summary.index
+        ) else None
+
+        # ----------------------------------------------------
+        # PERFORMANCE CARDS
+        # ----------------------------------------------------
+
+        direct_col, pipeline_col, ratio_col = st.columns(3)
+
+        with direct_col:
+            if direct_row is not None:
+                st.metric(
+                    "DIRECT ENGINE THROUGHPUT",
+                    f"{direct_row['Throughput']:,.0f} orders/sec",
+                )
+                st.caption(
+                    f"Median sampled latency: "
+                    f"{direct_row['Median_Latency']:.2f} µs"
+                )
+
+        with pipeline_col:
+            if pipeline_row is not None:
+                st.metric(
+                    "PIPELINE THROUGHPUT",
+                    f"{pipeline_row['Throughput']:,.0f} orders/sec",
+                )
+                st.caption(
+                    f"Median sampled latency: "
+                    f"{pipeline_row['Median_Latency']:.2f} µs"
+                )
+
+        with ratio_col:
+            if direct_row is not None and pipeline_row is not None:
+                if pipeline_row["Throughput"] > 0:
+                    ratio = (
+                        direct_row["Throughput"]
+                        / pipeline_row["Throughput"]
+                    )
+                    st.metric(
+                        "DIRECT / PIPELINE",
+                        f"{ratio:.2f}x",
+                    )
+                    st.caption(
+                        "Throughput ratio; higher means "
+                        "the direct path processed more orders/sec."
+                    )
+
+        # ----------------------------------------------------
+        # THROUGHPUT COMPARISON
+        # ----------------------------------------------------
+
+        st.markdown("### Throughput Comparison")
+        st.caption(
+            "Each bar represents the median throughput for a session "
+            "and mode. Throughput is measured over the full trial."
+        )
+
+        throughput_chart = (
+            benchmark_df.groupby(["Session", "Mode"])["throughput_ops"]
+            .median()
+            .unstack("Mode")
+        )
+
+        st.bar_chart(
+            throughput_chart,
+            y_label="Orders per second",
+            height=350,
+        )
+
+        # ----------------------------------------------------
+        # LATENCY COMPARISON
+        # ----------------------------------------------------
+
+        st.markdown("### Latency Percentiles")
+        st.caption(
+            "Median of the sampled latency statistics across trials. "
+            "Samples were collected every 100 orders; these are not "
+            "percentiles calculated from every order."
+        )
+
+        latency_summary = summary[
+            ["Median_Latency", "P95_Latency", "P99_Latency"]
+        ].rename(
+            columns={
+                "Median_Latency": "Median (µs)",
+                "P95_Latency": "P95 (µs)",
+                "P99_Latency": "P99 (µs)",
+            }
+        )
+
+        st.bar_chart(
+            latency_summary,
+            y_label="Latency (µs)",
+            height=350,
+        )
+
+        # ----------------------------------------------------
+        # PIPELINE STAGE TIMINGS
+        # ----------------------------------------------------
+
+        st.markdown("### Pipeline Stage Timings")
+        st.caption(
+            "Median sampled time per stage. These are measurements "
+            "from the benchmark pipeline, not dashboard refresh timings."
+        )
+
+        if pipeline_row is not None:
+            stage_data = pd.DataFrame(
+                {
+                    "Stage": [
+                        "Ring Buffer Write",
+                        "Ring Buffer Read",
+                        "Matching Engine",
+                    ],
+                    "Latency (µs)": [
+                        pipeline_row["Write_Time"],
+                        pipeline_row["Read_Time"],
+                        pipeline_row["Engine_Time"],
+                    ],
+                }
+            ).set_index("Stage")
+
+            stage_col, stage_info_col = st.columns([2, 1])
+
+            with stage_col:
+                st.bar_chart(
+                    stage_data,
+                    y_label="Latency (µs)",
+                    height=300,
+                )
+
+            with stage_info_col:
+                st.metric(
+                    "WRITE",
+                    f"{pipeline_row['Write_Time']:.3f} µs",
+                )
+                st.metric(
+                    "READ",
+                    f"{pipeline_row['Read_Time']:.3f} µs",
+                )
+                st.metric(
+                    "ENGINE",
+                    f"{pipeline_row['Engine_Time']:.3f} µs",
+                )
+
+        # ----------------------------------------------------
+        # TRIAL-BY-TRIAL RESULTS
+        # ----------------------------------------------------
+
+        st.markdown("### Individual Benchmark Trials")
+
+        display_columns = [
+            "Session",
+            "run",
+            "Mode",
+            "orders",
+            "throughput_ops",
+            "sampled_median_latency_us",
+            "sampled_p95_latency_us",
+            "sampled_p99_latency_us",
+            "avg_write_us",
+            "avg_read_us",
+            "avg_engine_us",
+            "trades",
+        ]
+
+        display_df = benchmark_df[display_columns].rename(
+            columns={
+                "run": "Trial",
+                "orders": "Orders",
+                "throughput_ops": "Throughput (orders/sec)",
+                "sampled_median_latency_us": "Median Latency (µs)",
+                "sampled_p95_latency_us": "P95 Latency (µs)",
+                "sampled_p99_latency_us": "P99 Latency (µs)",
+                "avg_write_us": "Write (µs)",
+                "avg_read_us": "Read (µs)",
+                "avg_engine_us": "Engine (µs)",
+                "trades": "Trades",
+            }
+        )
+
+        st.dataframe(
+            display_df.round(3),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Download the combined benchmark results.
+        csv_data = benchmark_df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            label="Download Combined Benchmark Results",
+            data=csv_data,
+            file_name="chronosmatch_benchmark_comparison.csv",
+            mime="text/csv",
+        )
+
+        st.caption(
+            "Results are based on the available CSV trials. "
+            "They do not represent live exchange performance or "
+            "guaranteed production latency."
+        )
+
+else:
+    st.info(
+        "No benchmark results are available yet. "
+        "Run Benchmark V2 and ensure benchmark_v2_repeat1.csv "
+        "and benchmark_v2_repeat2.csv are in the project directory."
+    )
+    # Automatically refresh the dashboard.
 time.sleep(refresh_seconds)
 st.rerun()
