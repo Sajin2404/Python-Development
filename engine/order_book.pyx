@@ -148,33 +148,63 @@ cdef class OrderBook:
         if self.trade_buffer != NULL:
             free(self.trade_buffer)
 
+    
     cdef int _find_level(self, PriceLevel* levels, int count,
                          int64_t price, bint descending) noexcept nogil:
-        cdef int i
-        for i in range(count):
-            if levels[i].price == price:
-                return i
-            if descending and levels[i].price < price:
-                break
-            if not descending and levels[i].price > price:
-                break
-        return -1
+        cdef int left = 0
+        cdef int right = count - 1
+        cdef int mid
+        cdef int64_t mid_price
 
+        while left <= right:
+            mid = left + (right - left) // 2
+            mid_price = levels[mid].price
+
+            if mid_price == price:
+                return mid
+
+            if descending:
+                if mid_price > price:
+                    left = mid + 1
+                else:
+                    right = mid - 1
+            else:
+                if mid_price < price:
+                    left = mid + 1
+                else:
+                    right = mid - 1
+
+        return -1
+    
     cdef int _insert_level(self, PriceLevel* levels, int* count,
                            int64_t price, bint descending) except -1:
-        cdef int pos = 0
+        cdef int left = 0
+        cdef int right = count[0]
+        cdef int mid
+        cdef int pos
         cdef int i
 
         if count[0] >= self.order_capacity:
             raise MemoryError("Price level capacity reached")
 
-        while pos < count[0]:
-            if descending and levels[pos].price < price:
-                break
-            if not descending and levels[pos].price > price:
-                break
-            pos += 1
+        # Find the insertion position using binary search.
+        while left < right:
+            mid = left + (right - left) // 2
 
+            if descending:
+                if levels[mid].price > price:
+                    left = mid + 1
+                else:
+                    right = mid
+            else:
+                if levels[mid].price < price:
+                    left = mid + 1
+                else:
+                    right = mid
+
+        pos = left
+
+        # Shift entries to make room for the new price level.
         for i in range(count[0], pos, -1):
             levels[i] = levels[i - 1]
 
@@ -182,8 +212,9 @@ cdef class OrderBook:
         levels[pos].head = -1
         levels[pos].tail = -1
         count[0] += 1
-        return pos
 
+        return pos
+     
     cdef void _remove_level(self, PriceLevel* levels, int* count,
                             int pos) noexcept nogil:
         cdef int i
