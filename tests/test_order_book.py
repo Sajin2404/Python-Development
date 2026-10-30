@@ -54,7 +54,25 @@ class TestOrderBook(unittest.TestCase):
         self.assertEqual(trades[0]["quantity"], 5)
         self.assertEqual(trades[1]["buy_order_id"], 2)
         self.assertEqual(trades[1]["quantity"], 2)
+    
+    def test_reuses_slots_after_orders_are_filled(self):
+        book = OrderBook(capacity=2)
 
+        # First pair of orders matches completely.
+        book.add_order(1, 1, 10000, 5)
+        book.add_order(2, 2, 10000, 5)
+
+        self.assertEqual(len(book.get_trades()), 1)
+
+        # The order book has capacity for only two order slots.
+        # These slots should now be reusable.
+        book.add_order(3, 1, 10100, 2)
+        self.assertEqual(book.get_best_bid(), 10100)
+
+        # This order should match the resting buy order.
+        book.add_order(4, 2, 10100, 2)
+
+        self.assertEqual(len(book.get_trades()), 2)
 
 if __name__ == "__main__":
     unittest.main()

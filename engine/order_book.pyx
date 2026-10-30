@@ -32,6 +32,7 @@ cdef int64_t _match_orders_nogil(
     Order* orders,
     PriceLevel* levels,
     int* level_count,
+    int* free_order_slot,
     Trade* trade_buffer,
     int trade_capacity,
     int* trade_count,
@@ -44,6 +45,7 @@ cdef int64_t _match_orders_nogil(
     cdef int64_t fill
     cdef int resting_slot
     cdef int i
+    cdef int next_slot
 
     while remaining > 0 and level_count[0] > 0:
         if side == 1 and levels[0].price > incoming_price:
@@ -72,12 +74,16 @@ cdef int64_t _match_orders_nogil(
         trade_buffer[trade_count[0]].price = levels[0].price
         trade_buffer[trade_count[0]].quantity = fill
         trade_count[0] += 1
-
         remaining -= fill
         orders[resting_slot].remaining -= fill
 
         if orders[resting_slot].remaining == 0:
-            levels[0].head = orders[resting_slot].next
+            next_slot = orders[resting_slot].next
+            levels[0].head = next_slot
+           
+            # Return the completed resting order to the native free-list.
+            orders[resting_slot].next = free_order_slot[0]
+            free_order_slot[0] = resting_slot
 
             if levels[0].head == -1:
                 levels[0].tail = -1
@@ -99,6 +105,7 @@ cdef class OrderBook:
     cdef int bid_count
     cdef int ask_count
     cdef int next_order_slot
+    cdef int free_order_slot
     cdef int trade_count
 
     def __cinit__(self, int capacity=1000000):
@@ -110,6 +117,7 @@ cdef class OrderBook:
         self.bid_count = 0
         self.ask_count = 0
         self.next_order_slot = 0
+        self.free_order_slot = -1
         self.trade_count = 0
         self.trade_buffer = NULL
 
@@ -225,12 +233,17 @@ cdef class OrderBook:
     cdef int _allocate_order(self, int64_t order_id, int side,
                              int64_t price, int64_t quantity) except -1:
         cdef int slot
-        if self.next_order_slot >= self.order_capacity:
-            raise MemoryError(
-                "Order capacity reached; create a new book or increase capacity"
-            )
-        slot = self.next_order_slot
-        self.next_order_slot += 1
+
+        if self.free_order_slot != -1:
+            slot = self.free_order_slot
+            self.free_order_slot = self.orders[slot].next
+        else:
+            if self.next_order_slot >= self.order_capacity:
+                raise MemoryError(
+                    "Order capacity reached; create a new book or increase capacity"
+                )
+            slot = self.next_order_slot
+            self.next_order_slot += 1
 
         self.orders[slot].order_id = order_id
         self.orders[slot].side = side
@@ -238,6 +251,7 @@ cdef class OrderBook:
         self.orders[slot].quantity = quantity
         self.orders[slot].remaining = quantity
         self.orders[slot].next = -1
+
         return slot
 
     cdef void _append_order(self, PriceLevel* levels, int level,
@@ -315,6 +329,7 @@ cdef class OrderBook:
                 self.orders,
                 opposing_levels,
                 opposing_count,
+                &self.free_order_slot,
                 self.trade_buffer,
                 self.order_capacity,
                 &self.trade_count,
@@ -349,6 +364,10 @@ cdef class OrderBook:
                     )
                 self.orders[slot].remaining = remaining
                 self._append_order(self.asks, level, slot)
+        else:
+            # The incoming order was fully matched and never rests in the book.
+            self.orders[slot].next = self.free_order_slot
+            self.free_order_slot = slot
 
         return remaining
 
