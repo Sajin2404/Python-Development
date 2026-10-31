@@ -54,7 +54,7 @@ class TestOrderBook(unittest.TestCase):
         self.assertEqual(trades[0]["quantity"], 5)
         self.assertEqual(trades[1]["buy_order_id"], 2)
         self.assertEqual(trades[1]["quantity"], 2)
-    
+
     def test_reuses_slots_after_orders_are_filled(self):
         book = OrderBook(capacity=2)
 
@@ -73,6 +73,20 @@ class TestOrderBook(unittest.TestCase):
         book.add_order(4, 2, 10100, 2)
 
         self.assertEqual(len(book.get_trades()), 2)
+    def test_order_capacity_exhaustion_preserves_book(self):
+        book = OrderBook(capacity=1)
+
+        # Fill the only available order slot.
+        book.add_order(1, 1, 10000, 5)
+
+        # A second resting order must be rejected.
+        with self.assertRaises(MemoryError):
+            book.add_order(2, 1, 9900, 3)
+
+        # The original order must remain intact.
+        self.assertEqual(book.get_best_bid(), 10000)
+        self.assertIsNone(book.get_best_ask())
+        self.assertEqual(book.get_trades(), [])
 
 if __name__ == "__main__":
     unittest.main()
