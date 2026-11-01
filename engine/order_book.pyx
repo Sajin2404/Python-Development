@@ -2,6 +2,7 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, initializedcheck=False
 
 from libc.stdint cimport int64_t, uint64_t
+from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
 from libc.limits cimport INT_MAX
 
@@ -112,6 +113,11 @@ cdef class OrderBook:
         if capacity <= 0:
             raise ValueError("capacity must be positive")
 
+        if (
+            <size_t>capacity > (<size_t>-1) // sizeof(Order)
+            or <size_t>capacity > (<size_t>-1) // sizeof(PriceLevel)
+            or <size_t>capacity > (<size_t>-1) // sizeof(Trade)):
+            raise OverflowError("Order book capacity exceeds safe allocation size")
         
         self.order_capacity = capacity
         self.bid_count = 0
