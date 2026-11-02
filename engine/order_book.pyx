@@ -1,6 +1,6 @@
 
 # cython: language_level=3, boundscheck=False, wraparound=False, initializedcheck=False
-
+import time
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
@@ -108,6 +108,9 @@ cdef class OrderBook:
     cdef int next_order_slot
     cdef int free_order_slot
     cdef int trade_count
+    cdef int64_t last_engine_entry_ns
+    cdef int64_t last_engine_exit_ns
+    cdef int64_t last_engine_duration_ns
 
     def __cinit__(self, int capacity=1000000):
         if capacity <= 0:
@@ -126,6 +129,9 @@ cdef class OrderBook:
         self.free_order_slot = -1
         self.trade_count = 0
         self.trade_buffer = NULL
+        self.last_engine_entry_ns = 0
+        self.last_engine_exit_ns = 0
+        self.last_engine_duration_ns = 0
 
         self.orders = <Order*>malloc(capacity * sizeof(Order))
         self.bids = <PriceLevel*>malloc(capacity * sizeof(PriceLevel))
@@ -285,6 +291,8 @@ cdef class OrderBook:
         cdef int64_t resting_quantity
         cdef PriceLevel* opposing_levels
         cdef int* opposing_count
+        cdef int64_t engine_entry_ns
+        cdef int64_t engine_exit_ns
 
         if s not in (1, 2):
             raise ValueError("side must be 1 (BUY) or 2 (SELL)")
@@ -329,6 +337,8 @@ cdef class OrderBook:
 
         # Allocate before matching so capacity errors cannot occur afterward.
         slot = self._allocate_order(oid, s, p, q)
+        
+        engine_entry_ns = time.perf_counter_ns()         
 
         with nogil:
             remaining = _match_orders_nogil(
@@ -345,6 +355,13 @@ cdef class OrderBook:
                 q
             )
 
+
+        engine_exit_ns = time.perf_counter_ns()
+
+        self.last_engine_entry_ns = engine_entry_ns
+        self.last_engine_exit_ns = engine_exit_ns
+        self.last_engine_duration_ns = engine_exit_ns - engine_entry_ns
+          
         if remaining < 0:
             raise RuntimeError("Native matching failed")
 
@@ -444,3 +461,11 @@ cdef class OrderBook:
             })
 
         return trades
+
+    def get_last_engine_timing(self):
+     """Return timing metrics for the most recent matching operation."""
+     return {
+         "entry_ns": self.last_engine_entry_ns,
+         "exit_ns": self.last_engine_exit_ns,
+         "duration_ns": self.last_engine_duration_ns,
+     }    
