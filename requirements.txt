@@ -1,0 +1,6 @@
+streamlit>=1.40
+pandas>=2.0
+plotly>=5.20
+Cython>=3.0
+setuptools>=68
+wheel

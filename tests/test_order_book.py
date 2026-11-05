@@ -88,5 +88,22 @@ class TestOrderBook(unittest.TestCase):
         self.assertIsNone(book.get_best_ask())
         self.assertEqual(book.get_trades(), [])
 
+
+    def test_cancel_resting_order(self):
+        book = OrderBook(capacity=4)
+        book.add_order(101, 1, 10000, 5)
+        self.assertEqual(book.get_best_bid(), 10000)
+        self.assertTrue(book.cancel_order(101))
+        self.assertIsNone(book.get_best_bid())
+        self.assertFalse(book.cancel_order(101))
+
+    def test_cancel_keeps_other_fifo_orders(self):
+        book = OrderBook(capacity=4)
+        book.add_order(201, 1, 10000, 5)
+        book.add_order(202, 1, 10000, 7)
+        self.assertTrue(book.cancel_order(201))
+        depth = book.get_market_depth(5)
+        self.assertEqual(depth["bids"][0]["quantity"], 7)
+
 if __name__ == "__main__":
     unittest.main()

@@ -394,6 +394,58 @@ cdef class OrderBook:
 
         return remaining
 
+
+    def cancel_order(self, order_id):
+        """Cancel a resting order by ID. Returns True if found and removed."""
+        cdef int side_index
+        cdef int level_index
+        cdef int slot
+        cdef int previous
+        cdef int next_slot
+        cdef PriceLevel* levels
+        cdef int* level_count
+
+        # Search bids first, then asks.
+        for side_index in range(2):
+            if side_index == 0:
+                levels = self.bids
+                level_count = &self.bid_count
+            else:
+                levels = self.asks
+                level_count = &self.ask_count
+
+            for level_index in range(level_count[0]):
+                slot = levels[level_index].head
+                previous = -1
+
+                while slot != -1:
+                    if self.orders[slot].order_id == order_id:
+                        next_slot = self.orders[slot].next
+
+                        if previous == -1:
+                            levels[level_index].head = next_slot
+                        else:
+                            self.orders[previous].next = next_slot
+
+                        if levels[level_index].tail == slot:
+                            levels[level_index].tail = previous
+
+                        self.orders[slot].remaining = 0
+                        self.orders[slot].next = self.free_order_slot
+                        self.free_order_slot = slot
+
+                        if levels[level_index].head == -1:
+                            self._remove_level(
+                                levels, level_count, level_index
+                            )
+
+                        return True
+
+                    previous = slot
+                    slot = self.orders[slot].next
+
+        return False
+
     def get_best_bid(self):
         if self.bid_count == 0:
             return None
